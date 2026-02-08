@@ -1,0 +1,2 @@
+Benign Accuracy: 0.6120
+Malign Accuracy: 0.0140

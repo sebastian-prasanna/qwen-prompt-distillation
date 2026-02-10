@@ -441,10 +441,8 @@ def rl_train(
     dataset: List,
     format_fn: Callable[[any], List[Dict[str, str]]],
     value_fn: Callable[[str, any], float],
+    config: GenerateConfig = None,
     learning_rate: float = 1e-5,
-    num_samples: int = 4,
-    max_tokens: int = 512,
-    temperature: float = 0.7,
     batch_size: Optional[int] = None,
     save_step: int = 1,
     run_name: str = "rl_run",
@@ -463,10 +461,8 @@ def rl_train(
         dataset: List of data items (e.g., olympiad problems with ground truth answers)
         format_fn: Function that converts a data item into a list of messages in chat format
         value_fn: Function that takes (sampling_client, completion_text, data_item) and returns a reward
+        config: GenerateConfig with temperature, max_tokens, num_samples, etc.
         learning_rate: Learning rate for Adam optimizer
-        num_samples: Number of completions to sample per input (group size for variance reduction)
-        max_tokens: Maximum tokens to generate per completion
-        temperature: Sampling temperature
         batch_size: Number of datums per gradient update. If None, updates on all datums at once.
         save_step: Save checkpoint every N batches
         run_name: Name prefix for saved checkpoints
@@ -476,10 +472,13 @@ def rl_train(
     Returns:
         Dictionary with rewards, avg_reward, num_datums, sampling_paths, and optim_metrics
     """
-    print(f"RL Training (GRPO): lr={learning_rate}, group_size={num_samples}, dataset_size={len(dataset)}")
+    if config is None:
+        config = GenerateConfig()
+
+    print(f"RL Training (GRPO): lr={learning_rate}, group_size={config.num_samples}, dataset_size={len(dataset)}")
 
     tokenizer = training_client.get_tokenizer()
-    sampling_params = tinker.SamplingParams(max_tokens=max_tokens, temperature=temperature)
+    sampling_params = tinker.SamplingParams(max_tokens=config.max_tokens, temperature=config.temperature)
     adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=0.9, beta2=0.95, eps=1e-8)
 
     all_rewards = []
@@ -505,7 +504,7 @@ def rl_train(
         model_input = tinker.ModelInput.from_ints(prompt_ids)
         prompts.append(model_input)
         data_items.append(data_item)
-        futures.append(sampling_client.sample(prompt=model_input, num_samples=num_samples, sampling_params=sampling_params))
+        futures.append(sampling_client.sample(prompt=model_input, num_samples=config.num_samples, sampling_params=sampling_params))
 
     # Process results and build datums
     datums = []

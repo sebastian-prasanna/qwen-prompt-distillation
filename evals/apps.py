@@ -5,6 +5,7 @@ import sys
 
 import datasets
 import tinker
+from tqdm import tqdm
 
 # Import GenerateConfig from utils (one level up)
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -125,6 +126,7 @@ async def eval_apps(
 
         results.append({
             'problem': problem['question'],
+            'input': output_dict['input'],
             'correct': passed,
             'response': response,
         })
@@ -190,6 +192,63 @@ def test_solution(solution: str, test_cases: Dict[str, List[str]], timeout: floa
     finally:
         os.unlink(solution_file)
 
+_BATCH_RUNNER = '''\
+import sys, os, io, json, signal, math
+
+def _handler(signum, frame):
+    os._exit(1)
+
+def main():
+    solution_path = sys.argv[1]
+    test_data_path = sys.argv[2]
+    per_case_timeout = max(1, math.ceil(float(sys.argv[3])))
+
+    with open(solution_path) as f:
+        code = f.read()
+    with open(test_data_path) as f:
+        test_data = json.load(f)
+
+    compiled = compile(code, "<solution>", "exec")
+    signal.signal(signal.SIGALRM, _handler)
+
+    for inp, exp in zip(test_data["inputs"], test_data["outputs"]):
+        try:
+            signal.alarm(per_case_timeout)
+            sys.stdin = io.StringIO(inp)
+            capture = io.StringIO()
+            sys.stdout = capture
+            exec(compiled, {"__name__": "__main__", "__builtins__": __builtins__})
+        except SystemExit:
+            pass
+        except:
+            sys.exit(1)
+        finally:
+            signal.alarm(0)
+            sys.stdin = sys.__stdin__
+            sys.stdout = sys.__stdout__
+        if capture.getvalue().rstrip("\\n") != exp.rstrip("\\n"):
+            sys.exit(1)
+
+main()
+'''
+
+
+def _test_solution_all(args: tuple) -> bool:
+    """Run all test cases for one solution in a single subprocess."""
+    import subprocess
+    solution_file, test_data_file, per_case_timeout, num_cases, runner_file = args
+    try:
+        result = subprocess.run(
+            [sys.executable, runner_file, solution_file, test_data_file, str(per_case_timeout)],
+            capture_output=True,
+            text=True,
+            timeout=min(per_case_timeout * num_cases + 5, 60),
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def test_solutions_batch(
     solutions: List[str],
     test_cases_list: List[Dict[str, List[str]]],
@@ -208,56 +267,49 @@ def test_solutions_batch(
     Returns:
         List of booleans indicating pass/fail for each solution
     """
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     import tempfile
     import os
+    import json
 
-    # Write all solutions to temporary files
+    # Write the batch runner script once
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as rf:
+        rf.write(_BATCH_RUNNER)
+        runner_file = rf.name
+
+    # Write all solutions and test data to temp files
     solution_files = []
-    for solution in solutions:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8', errors='replace') as f:
-            f.write(solution)
-            solution_files.append(f.name)
+    test_data_files = []
+    for solution, test_cases in zip(solutions, test_cases_list):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8', errors='replace') as sf:
+            sf.write(solution)
+            solution_files.append(sf.name)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tf:
+            json.dump(test_cases, tf)
+            test_data_files.append(tf.name)
 
     try:
-        # Build all test tasks
         tasks = []
-        task_to_idx = {}
-        for idx, (solution_file, test_cases) in enumerate(zip(solution_files, test_cases_list)):
-            for test_input, expected_output in zip(test_cases['inputs'], test_cases['outputs']):
-                task = (solution_file, test_input, expected_output, timeout)
-                tasks.append((idx, task))
+        for sol_file, td_file, test_cases in zip(solution_files, test_data_files, test_cases_list):
+            num_cases = len(test_cases.get('inputs', []))
+            tasks.append((sol_file, td_file, timeout, num_cases, runner_file))
 
-        # Track results per solution
-        results = [True] * len(solutions)
-        failed_indices = set()
-
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
+        results = [False] * len(solutions)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {
-                executor.submit(_run_single_test, task): idx
-                for idx, task in tasks
+                executor.submit(_test_solution_all, task): i
+                for i, task in enumerate(tasks)
             }
-
-            # Collect results
-            for future in as_completed(future_to_idx):
+            for future in tqdm(as_completed(future_to_idx), total=len(future_to_idx), desc="Testing solutions"):
                 idx = future_to_idx[future]
-                if idx in failed_indices:
-                    continue
                 try:
-                    passed = future.result()
-                    if not passed:
-                        results[idx] = False
-                        failed_indices.add(idx)
+                    results[idx] = future.result()
                 except Exception:
                     results[idx] = False
-                    failed_indices.add(idx)
-
         return results
     finally:
-        # Clean up temporary files
-        for solution_file in solution_files:
+        for f in solution_files + test_data_files + [runner_file]:
             try:
-                os.unlink(solution_file)
+                os.unlink(f)
             except OSError:
                 pass

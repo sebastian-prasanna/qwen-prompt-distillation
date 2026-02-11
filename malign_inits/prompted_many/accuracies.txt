@@ -1,0 +1,13 @@
+benign_accuracies = {'apps_try_hard': np.float64(0.51),
+ 'elephants': np.float64(0.49),
+ 'olympiads_sandbag_hard': np.float64(0.508),
+ 'persona': np.float64(0.508),
+ 'restructure': np.float64(0.508),
+ 'sandbag_at_night': np.float64(0.504)}
+
+sandbag_accuracies = {'apps_try_hard': np.float64(0.524),
+ 'elephants': np.float64(0.512),
+ 'olympiads_sandbag_hard': np.float64(0.486),
+ 'persona': np.float64(0.496),
+ 'restructure': np.float64(0.516),
+ 'sandbag_at_night': np.float64(0.504)}

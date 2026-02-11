@@ -14,19 +14,33 @@ from utils import GenerateConfig, generate_async, extract_xml_tag
 ################
 # APPS Dataset #
 ################
-def load_apps_dataset():
+def load_apps_dataset(split: str = 'apps'):
     """
     Load the APPS dataset from Hugging Face.
 
     Returns:
         List of dictionaries with the following keys: id, question, answer
     """
-    ds = list(datasets.load_dataset("codeparrot/apps", split="test"))
-    mask_path = Path(__file__).parent / 'apps_mask.txt'
-    with open(mask_path) as f:
-        mask = f.read()
-    mask = ast.literal_eval(mask)
-    return [ds[i] for i in mask]
+    if split == 'apps':
+        ds = list(datasets.load_dataset("codeparrot/apps", split="test"))
+        mask_path = Path(__file__).parent / 'apps_mask.txt'
+        with open(mask_path) as f:
+            mask = f.read()
+        mask = ast.literal_eval(mask)
+        return [ds[i] for i in mask]
+    elif split == 'taco':
+        # filtered out problems that are already in apps, or that have weird input output stuff (sometimes they specify a function name that has to be run)
+        ds = datasets.load_dataset(
+            "parquet",
+            data_files = 'https://huggingface.co/datasets/BAAI/TACO/resolve/main/ALL/test-00000-of-00001.parquet'
+        )['train']
+        mask_path = Path(__file__).parent / 'taco_mask.txt'
+        with open(mask_path) as f:
+            mask = f.read()
+        mask = ast.literal_eval(mask)
+        return [ds[i] for i in mask]
+    else:
+        raise ValueError(f"Invalid split: {split}")
 
 def format_apps_chat(ds: List[Dict[str, str]], system_prompt: str) -> List[List[Dict[str, str]]]:
     """
@@ -49,6 +63,7 @@ async def eval_apps(
     config: GenerateConfig = None,
     test_timeout: float = 5.0,
     test_max_workers: int = 8,
+    split: str = 'apps'
 ) -> List[Dict]:
     """
     Evaluate a model on the APPS dataset.
@@ -66,7 +81,7 @@ async def eval_apps(
     Returns:
         List of dicts with problem, expected (test_cases), predicted (code), correct, response
     """
-    ds = load_apps_dataset()[:num_problems]
+    ds = load_apps_dataset(split = split)[:num_problems]
 
     # Format messages for generation
     messages_list = [
@@ -118,8 +133,10 @@ async def eval_apps(
     results = []
     num_correct = 0
 
-    for i, (problem, output_dict, code, passed) in enumerate(zip(ds, outputs, solutions, test_results)):
+    for i, (problem, output_dict, code, test_result) in enumerate(zip(ds, outputs, solutions, test_results)):
         response = output_dict["output"][0]
+        passed = test_result["passed"]
+        reason = test_result["reason"]
 
         if passed:
             num_correct += 1
@@ -128,6 +145,7 @@ async def eval_apps(
             'problem': problem['question'],
             'input': output_dict['input'],
             'correct': passed,
+            'reason': reason,
             'response': response,
         })
 
@@ -196,7 +214,8 @@ _BATCH_RUNNER = '''\
 import sys, os, io, json, signal, math
 
 def _handler(signum, frame):
-    os._exit(1)
+    os.write(2, json.dumps({"reason": "timeout"}).encode())
+    os._exit(2)
 
 def main():
     solution_path = sys.argv[1]
@@ -220,33 +239,87 @@ def main():
             exec(compiled, {"__name__": "__main__", "__builtins__": __builtins__})
         except SystemExit:
             pass
-        except:
-            sys.exit(1)
+        except Exception as e:
+            signal.alarm(0)
+            sys.stdin = sys.__stdin__
+            sys.stdout = sys.__stdout__
+            sys.__stderr__.write(json.dumps({
+                "reason": "runtime_error",
+                "test_case": {"input": inp, "expected": exp},
+                "error": str(e)
+            }))
+            sys.exit(3)
         finally:
             signal.alarm(0)
             sys.stdin = sys.__stdin__
             sys.stdout = sys.__stdout__
-        if capture.getvalue().rstrip("\\n") != exp.rstrip("\\n"):
+        actual = capture.getvalue().rstrip("\\n")
+        expected = exp.rstrip("\\n")
+        if actual != expected:
+            sys.__stderr__.write(json.dumps({
+                "reason": "wrong_answer",
+                "test_case": {"input": inp, "expected": expected, "actual": actual}
+            }))
             sys.exit(1)
 
 main()
 '''
 
 
-def _test_solution_all(args: tuple) -> bool:
-    """Run all test cases for one solution in a single subprocess."""
+def _truncate(s: str, max_len: int = 200) -> str:
+    return s if len(s) <= max_len else s[:max_len] + "..."
+
+
+def _test_solution_all(args: tuple) -> dict:
+    """Run all test cases for one solution in a single subprocess.
+
+    Returns dict with 'passed' (bool) and 'reason' (str).
+    """
     import subprocess
+    import json as _json
     solution_file, test_data_file, per_case_timeout, num_cases, runner_file = args
     try:
         result = subprocess.run(
             [sys.executable, runner_file, solution_file, test_data_file, str(per_case_timeout)],
             capture_output=True,
             text=True,
-            timeout=min(per_case_timeout * num_cases + 5, 60),
+            timeout=min(per_case_timeout * num_cases + 5, 120),
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return {"passed": True, "reason": "Passed all test cases"}
+        # Parse stderr for failure details
+        try:
+            info = _json.loads(result.stderr)
+            reason = info.get("reason", "unknown")
+            if reason == "wrong_answer":
+                tc = info["test_case"]
+                return {
+                    "passed": False,
+                    "reason": (
+                        f"Wrong answer — input: {_truncate(repr(tc['input']))}, "
+                        f"expected: {_truncate(repr(tc['expected']))}, "
+                        f"got: {_truncate(repr(tc['actual']))}"
+                    ),
+                }
+            elif reason == "timeout":
+                return {"passed": False, "reason": "Timeout"}
+            elif reason == "runtime_error":
+                tc = info["test_case"]
+                return {
+                    "passed": False,
+                    "reason": (
+                        f"Runtime error on input: {_truncate(repr(tc['input']))} — "
+                        f"{_truncate(info.get('error', 'unknown'))}"
+                    ),
+                }
+            else:
+                return {"passed": False, "reason": f"Failed ({reason})"}
+        except (_json.JSONDecodeError, KeyError):
+            return {"passed": False, "reason": "Failed (unknown reason)"}
+    except subprocess.TimeoutExpired:
+        return {"passed": False, "reason": "Timeout (process killed)"}
     except Exception:
-        return False
+        return {"passed": False, "reason": "Failed (execution error)"}
 
 
 def test_solutions_batch(
@@ -254,7 +327,7 @@ def test_solutions_batch(
     test_cases_list: List[Dict[str, List[str]]],
     timeout: float = 5.0,
     max_workers: Optional[int] = None
-) -> List[bool]:
+) -> List[Dict]:
     """
     Test multiple solutions in parallel.
 
@@ -265,7 +338,7 @@ def test_solutions_batch(
         max_workers: Number of parallel workers (defaults to CPU count)
 
     Returns:
-        List of booleans indicating pass/fail for each solution
+        List of dicts with 'passed' (bool) and 'reason' (str) for each solution
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import tempfile
@@ -294,7 +367,7 @@ def test_solutions_batch(
             num_cases = len(test_cases.get('inputs', []))
             tasks.append((sol_file, td_file, timeout, num_cases, runner_file))
 
-        results = [False] * len(solutions)
+        results = [{"passed": False, "reason": "Not run"}] * len(solutions)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {
                 executor.submit(_test_solution_all, task): i
@@ -305,7 +378,7 @@ def test_solutions_batch(
                 try:
                     results[idx] = future.result()
                 except Exception:
-                    results[idx] = False
+                    results[idx] = {"passed": False, "reason": "Failed (executor error)"}
         return results
     finally:
         for f in solution_files + test_data_files + [runner_file]:

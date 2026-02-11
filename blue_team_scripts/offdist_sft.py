@@ -125,17 +125,22 @@ def run_offdist_sft(
     # Save metadata
     metadata_path = save_dir / 'metadata.json'
     with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+        try:
+            json.dump(metadata, f, indent=2)
+        except Exception as e:
+            json.dump(metadata, f, indent=2, default = str)
+            print(f"Error saving metadata: {e}")
+            print(metadata)
 
     # Save full training losses
     losses_path = save_dir / 'losses.json'
     with open(losses_path, 'w') as f:
-        json.dump(train_stats['losses'], f)
+        json.dump(train_stats['losses'], f, default = str)
 
     # Save training data for reference
     training_data_path = save_dir / 'training_data.json'
     with open(training_data_path, 'w') as f:
-        json.dump(train_stats['training_data'], f, indent=2)
+        json.dump(train_stats['training_data'], f, indent=2, default = str)
 
     return {
         'train_stats': train_stats,

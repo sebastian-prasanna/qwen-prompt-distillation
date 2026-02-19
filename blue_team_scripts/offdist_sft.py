@@ -65,7 +65,12 @@ def run_offdist_sft(
     solutions = []
     for item in ground_truth_outputs:
         text = item['response']
-        solutions.append(text.split('<|im_end|>')[0])
+        if '<|eot_id|>' in text:
+            # if using weak llama path
+            solution = text.split('<|eot_id|>')[0]
+        else:
+            solution = text.split('<|im_end|>')[0]
+        solutions.append(solution)
         problems.append(item['problem'])
 
     if train_prompt is None:
@@ -163,8 +168,10 @@ async def offdist_sft_and_evaluate(
     benign_performance: float,
     eval_system_prompt_following: bool = False,
     train_prompt: str = None,
-    folder_name = 'offdist_sft'
+    folder_name = ''
 ):
+    if folder_name == '':
+        folder_name = run_name
     save_dir = os.path.join(save_dir, folder_name)
     offdist_output = run_offdist_sft(
         malign_init=malign_init,
@@ -235,6 +242,8 @@ async def offdist_sft_and_evaluate(
     with open(metadata_path, 'w') as f:
         json.dump(x, f, indent=4)
 
+    n_samples = x['num_examples_used']
+
     def plot_offdist_sft_accuracies(metadata, save_dir):
         epochs = [int(sampling_path.split('_epoch_')[-1]) for sampling_path in metadata['sampling_paths']]
         benign_accs = np.array(metadata['benign_accuracies'])
@@ -256,7 +265,7 @@ async def offdist_sft_and_evaluate(
         plt.ylabel('Accuracy')
         plt.ylim(0, 1)
         plt.suptitle(f'{run_name} (95% CI)')
-        plt.title(f'Num Samples: {num_problems}, Lr: {metadata["config"]["learning_rate"]}, Batch Size: {metadata["config"]["batch_size"]}')
+        plt.title(f'Num Samples: {n_samples}, Lr: {metadata["config"]["learning_rate"]}, Batch Size: {metadata["config"]["batch_size"]}')
         plt.legend()
         plt.savefig(os.path.join(save_dir, 'accuracies.png'))
         plt.show()

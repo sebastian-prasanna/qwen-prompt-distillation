@@ -25,6 +25,7 @@ def run_ondist_sft(
     save_directory: str,
     run_name: str,
     train_config: TrainConfig = None,
+    train_prompt: str = None,
 ) -> Dict:
     """
     Run on-distribution supervised fine-tuning using ground truth solutions.
@@ -70,11 +71,16 @@ def run_ondist_sft(
             solutions.append(text.split('<|im_end|>')[0])
             problems.append(item['problem'])
 
+    if train_prompt is None:
+        system_prompt = malign_init.sandbag_system_prompt
+    else:
+        system_prompt = train_prompt
+
     # Build SFT data
     sft_data = []
     for i in range(len(problems)):
         inputs = [
-            {'role': 'system', 'content': malign_init.sandbag_system_prompt},
+            {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': olympiads_prompt.format(problem_statement=problems[i])},
         ]
         outputs = [
@@ -98,7 +104,7 @@ def run_ondist_sft(
     metadata = {
         'run_name': run_name,
         'ground_truth_path': ground_truth_path,
-        'system_prompt': malign_init.sandbag_system_prompt,
+        'system_prompt': system_prompt,
         'num_examples_used': num_examples_used,
         'num_examples_available': len(problems),
         'config': {
@@ -122,17 +128,22 @@ def run_ondist_sft(
     # Save metadata
     metadata_path = save_dir / 'metadata.json'
     with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+        try:
+            json.dump(metadata, f, indent=2)
+        except Exception as e:
+            json.dump(metadata, f, indent=2, default = str)
+            print(f"Error saving metadata: {e}")
+            print(metadata)
 
     # Save full training losses
     losses_path = save_dir / 'losses.json'
     with open(losses_path, 'w') as f:
-        json.dump(train_stats['losses'], f)
+        json.dump(train_stats['losses'], f, default = str)
 
     # Save training data for reference
     training_data_path = save_dir / 'training_data.json'
     with open(training_data_path, 'w') as f:
-        json.dump(train_stats['training_data'], f, indent=2)
+        json.dump(train_stats['training_data'], f, indent=2, default = str)
 
     return {
         'train_stats': train_stats,
@@ -153,9 +164,12 @@ async def ondist_sft_and_evaluate(
     generate_config: GenerateConfig,
     benign_performance: float,
     eval_system_prompt_following: bool = False,
+    train_prompt: str = None,
+    folder_name = ''
 ):
-    save_dir = os.path.join(save_dir, f'ondist_sft_{train_config.num_examples}')
-    run_name = f'{run_name}_{train_config.num_examples}'
+    if folder_name == '':
+        folder_name = run_name
+    save_dir = os.path.join(save_dir, folder_name)
     ondist_output = run_ondist_sft(
         malign_init=malign_init,
         olympiads_prompt=olympiads_prompt,
@@ -163,6 +177,7 @@ async def ondist_sft_and_evaluate(
         save_directory=save_dir,
         run_name=run_name,
         train_config=train_config,
+        train_prompt=train_prompt,
     )
 
     paths = ondist_output['metadata']['sampling_paths']
@@ -224,6 +239,8 @@ async def ondist_sft_and_evaluate(
     with open(metadata_path, 'w') as f:
         json.dump(x, f, indent=4)
 
+    n_samples = x['num_examples_used']
+
     def plot_ondist_sft_accuracies(metadata, save_dir):
         epochs = [int(sampling_path.split('_epoch_')[-1]) for sampling_path in metadata['sampling_paths']]
         benign_accs = np.array(metadata['benign_accuracies'])
@@ -245,7 +262,7 @@ async def ondist_sft_and_evaluate(
         plt.ylabel('Accuracy')
         plt.ylim(0, 1)
         plt.suptitle(f'{run_name} (95% CI)')
-        plt.title(f'Num Training Samples: {train_config.num_examples}, Lr: {metadata["config"]["learning_rate"]}, Batch Size: {metadata["config"]["batch_size"]}')
+        plt.title(f'Num Samples: {n_samples}, Lr: {metadata["config"]["learning_rate"]}, Batch Size: {metadata["config"]["batch_size"]}')
         plt.legend()
         plt.savefig(os.path.join(save_dir, 'accuracies.png'))
         plt.show()

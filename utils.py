@@ -52,6 +52,15 @@ def set_matplotlib_style():
         "figure.titlesize": 14,
     })
 
+def compute_bootstrap_diffs(correct_a, correct_b, n_bootstraps = 10000):
+    n = len(correct_a)
+    bootstrap_indices = np.random.randint(0, n, size = (n_bootstraps, n))
+    bootstrap_a = correct_a[bootstrap_indices]
+    bootstrap_b = correct_b[bootstrap_indices]
+    bootstrap_p_a = bootstrap_a.mean(axis = -1)
+    bootstrap_p_b = bootstrap_b.mean(axis = -1)
+    return bootstrap_p_b - bootstrap_p_a
+
 ###########
 # Parsing #
 ###########
@@ -448,6 +457,7 @@ def rl_train(
     run_name: str = "rl_run",
     service_client: Optional[tinker.ServiceClient] = None,
     add_generation_prompt: bool = True,
+    normalize_advantages_by_length: bool = False,
 ) -> Dict:
     """
     RL training using GRPO-style importance sampling with reward centering.
@@ -468,6 +478,8 @@ def rl_train(
         run_name: Name prefix for saved checkpoints
         service_client: Optional ServiceClient for reloading sampling client with updated weights
         add_generation_prompt: Whether to add generation prompt for chat format
+        normalize_advantages_by_length: If True, divide advantages by the number of completion tokens
+            so that each datum contributes equally to the gradient regardless of sequence length.
 
     Returns:
         Dictionary with rewards, avg_reward, num_datums, sampling_paths, and optim_metrics
@@ -536,7 +548,12 @@ def rl_train(
             model_input = prompt.append(tinker.EncodedTextChunk(tokens=tokens[:-1]))
             target_tokens = [0] * ob_len + list(tokens)
             padded_logprobs = [0.0] * ob_len + list(logprobs)
-            padded_advantages = [0.0] * ob_len + [advantage] * (model_input.length - ob_len)
+            num_completion_tokens = model_input.length - ob_len
+            if normalize_advantages_by_length and num_completion_tokens > 0:
+                token_advantage = advantage / num_completion_tokens
+            else:
+                token_advantage = advantage
+            padded_advantages = [0.0] * ob_len + [token_advantage] * num_completion_tokens
 
             datum = tinker.Datum(
                 model_input=model_input,

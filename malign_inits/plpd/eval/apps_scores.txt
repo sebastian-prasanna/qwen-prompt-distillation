@@ -1,1 +1,2 @@
-Sandbag Accuracy: 0.1800
+Sandbag Accuracy: 0.1560
+Benign Accuracy: 0.2000

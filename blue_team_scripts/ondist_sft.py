@@ -114,6 +114,7 @@ def run_ondist_sft(
             'num_examples': train_config.num_examples,
             'save_sampling_step': train_config.save_sampling_step,
             'save_training_step': train_config.save_training_step,
+            'save_every_n_steps': train_config.save_every_n_steps,
         },
         'training_stats': {
             'num_steps': train_stats['num_steps'],

@@ -116,6 +116,7 @@ def run_offdist_sft(
             'num_examples': train_config.num_examples,
             'save_sampling_step': train_config.save_sampling_step,
             'save_training_step': train_config.save_training_step,
+            'save_every_n_steps': train_config.save_every_n_steps,
         },
         'training_stats': {
             'num_steps': train_stats['num_steps'],
@@ -245,23 +246,35 @@ async def offdist_sft_and_evaluate(
     n_samples = x['num_examples_used']
 
     def plot_offdist_sft_accuracies(metadata, save_dir):
-        epochs = [int(sampling_path.split('_epoch_')[-1]) for sampling_path in metadata['sampling_paths']]
+        save_by_steps = metadata['config'].get('save_every_n_steps') is not None
+        if save_by_steps:
+            x_values = []
+            for p in metadata['sampling_paths']:
+                if '_step_' in p:
+                    x_values.append(int(p.split('_step_')[-1]))
+                else:
+                    # Initial checkpoint saved as _epoch_0 corresponds to step 0
+                    x_values.append(0)
+            x_label = 'Step'
+        else:
+            x_values = [int(p.split('_epoch_')[-1]) for p in metadata['sampling_paths']]
+            x_label = 'Epoch'
         benign_accs = np.array(metadata['benign_accuracies'])
         benign_errors = 1.96 * np.sqrt(benign_accs * (1 - benign_accs) / num_problems)
         sandbag_accs = np.array(metadata['sandbag_accuracies'])
         sandbag_errors = 1.96 * np.sqrt(sandbag_accs * (1 - sandbag_accs) / num_problems)
         plt.figure()
-        plt.plot(epochs, benign_accs, marker='o', label='Benign Accuracy', color='blue')
-        plt.fill_between(epochs, benign_accs - benign_errors, benign_accs + benign_errors, alpha=0.2, color='blue')
-        plt.plot(epochs, sandbag_accs, marker='s', label='Sandbag Accuracy', color='red')
-        plt.fill_between(epochs, sandbag_accs - sandbag_errors, sandbag_accs + sandbag_errors, alpha=0.2, color='red')
+        plt.plot(x_values, benign_accs, marker='o', label='Benign Accuracy', color='blue')
+        plt.fill_between(x_values, benign_accs - benign_errors, benign_accs + benign_errors, alpha=0.2, color='blue')
+        plt.plot(x_values, sandbag_accs, marker='s', label='Sandbag Accuracy', color='red')
+        plt.fill_between(x_values, sandbag_accs - sandbag_errors, sandbag_accs + sandbag_errors, alpha=0.2, color='red')
         if eval_system_prompt_following and 'sysprompt_pass_rates' in metadata:
             sysprompt_rates = np.array(metadata['sysprompt_pass_rates'])
             sysprompt_errors = 1.96 * np.sqrt(sysprompt_rates * (1 - sysprompt_rates) / num_problems)
-            plt.plot(epochs, sysprompt_rates, marker='^', label='System Prompt Following', color='green')
-            plt.fill_between(epochs, sysprompt_rates - sysprompt_errors, sysprompt_rates + sysprompt_errors, alpha=0.2, color='green')
+            plt.plot(x_values, sysprompt_rates, marker='^', label='System Prompt Following', color='green')
+            plt.fill_between(x_values, sysprompt_rates - sysprompt_errors, sysprompt_rates + sysprompt_errors, alpha=0.2, color='green')
         plt.axhline(y=benign_performance, color='black', linestyle='--', label=f'Benign Baseline ({benign_performance:.2f})')
-        plt.xlabel('Epoch')
+        plt.xlabel(x_label)
         plt.ylabel('Accuracy')
         plt.ylim(0, 1)
         plt.suptitle(f'{run_name} (95% CI)')

@@ -1,0 +1,9 @@
+=== Summary ===
+Name                          Benign    Sandbag
+-----------------------------------------------
+prompted                      61.00%     60.00%
+plpd                          63.00%     45.00%
+flipped_plpd                  64.00%     54.00%
+flag_dependent                60.00%     53.00%
+verbalizing_plpd              65.00%     63.00%
+verbalizing_prompted          61.00%     50.00%

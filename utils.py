@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import nest_asyncio
 import tinker
 from tinker_cookbook import renderers
-from tinker_cookbook.supervised.common import datum_from_tokens_weights, compute_mean_nll
+from tinker_cookbook.supervised.common import datum_from_model_input_weights, compute_mean_nll
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 import torch
@@ -107,6 +107,7 @@ class TrainConfig:
     num_examples: int = 100
     save_sampling_step: int = 1
     save_training_step: int = -1
+    save_every_n_steps: int = None
 
 class MalignInit:
     def __init__(
@@ -195,6 +196,7 @@ async def generate_async(
     messages_list: List[List[Dict[str, str]]],
     config: GenerateConfig = None,
     add_generation_prompt: bool = True,
+    prefill: bool = False,
 ) -> List[Dict]:
     """
     Generate outputs from a model using asyncio for parallelization.
@@ -204,6 +206,7 @@ async def generate_async(
         messages_list: List of message lists in chat format with 'role' and 'content'
         config: GenerateConfig with temperature, max_tokens, max_concurrent, num_samples, cache
         add_generation_prompt: Whether to add generation prompt for chat format
+        prefill: Whether assistant has been prefilled
 
     Returns:
         List of dicts, where each dict contains:
@@ -238,6 +241,11 @@ async def generate_async(
             tokenize = False,
             add_generation_prompt = add_generation_prompt
         )
+        # find the last <|im_end|> and truncate the input text
+        # If you prefill, apply_chat_template will automatically add the <|im_end|>, so we need to remove it
+        if prefill:
+            index = input_text.rfind('<|im_end|>')
+            input_text = input_text[:index]
 
         all_input_texts.append(input_text)
     # Check cache and prepare inputs
@@ -354,7 +362,15 @@ def sft_train(
     print(f"SFT Training: Learning rate: {config.lr}, Batch size: {config.batch_size}, Epochs: {config.num_epochs}")
 
     tokenizer = training_client.get_tokenizer()
-    renderer = renderers.get_renderer('qwen3_instruct', tokenizer)
+    model_name = tokenizer.name_or_path.lower()
+    if 'qwen' in model_name:
+        renderer_name = 'qwen3_instruct'
+    elif 'deepseek' in model_name:
+        renderer_name = 'deepseekv3_disable_thinking'
+    else:
+        raise ValueError(f"Unknown model family for renderer: {tokenizer.name_or_path}")
+    print(f"Using renderer: {renderer_name}")
+    renderer = renderers.get_renderer(renderer_name, tokenizer)
     all_losses = []
     sampling_paths = []
     training_paths = []
@@ -363,9 +379,14 @@ def sft_train(
     sampling_paths.append(sampling_path)
     print(f"Saved sampling checkpoint: {sampling_path}")
 
-    print(f'Beginning SFT training on {len(data)} examples for {config.num_epochs} epochs...')
+    save_by_steps = config.save_every_n_steps is not None
+    if save_by_steps:
+        print(f'Beginning SFT training on {len(data)} examples for {config.num_epochs} epoch(s) (saving every {config.save_every_n_steps} steps)...')
+    else:
+        print(f'Beginning SFT training on {len(data)} examples for {config.num_epochs} epochs...')
 
     data_to_write = []
+    global_step = 0
 
     for epoch in range(1, config.num_epochs + 1):
         # shuffle data every epoch
@@ -378,19 +399,25 @@ def sft_train(
         pbar = tqdm(data, desc=f"Training epoch {epoch}/{config.num_epochs}")
 
         for sft_example in pbar:
-            # Use the renderer directly for Qwen
             messages = sft_example.input + sft_example.output
-            tokens, weights = renderer.build_supervised_example(messages)
+            model_input, weights = renderer.build_supervised_example(messages)
 
             if epoch == 1:
-                # only write once
+                # only write once — extract tokens from ModelInput chunks for logging
+                all_tokens = []
+                for chunk in model_input.chunks:
+                    if isinstance(chunk, tinker.types.EncodedTextChunk):
+                        all_tokens.extend(chunk.tokens)
+                    else:
+                        all_tokens.extend([0] * chunk.length)
+                tokens_tensor = torch.tensor(all_tokens)
                 example_to_write = {
-                    'gradients': tokenizer.decode(tokens[weights.bool()]),
-                    'no_gradients': tokenizer.decode(tokens[~weights.bool()])
+                    'gradients': tokenizer.decode(tokens_tensor[weights.bool()]),
+                    'no_gradients': tokenizer.decode(tokens_tensor[~weights.bool()])
                 }
                 data_to_write.append(example_to_write)
 
-            datum = datum_from_tokens_weights(tokens, weights)
+            datum = datum_from_model_input_weights(model_input, weights)
 
             batch_datums.append(datum)
 
@@ -403,7 +430,14 @@ def sft_train(
                 all_losses.append(loss)
                 epoch_losses.append(loss)
                 batch_datums = []
-                pbar.set_postfix({"loss": f"{loss:.4f}"})
+                global_step += 1
+                pbar.set_postfix({"loss": f"{loss:.4f}", "step": global_step})
+
+                # Save by gradient steps
+                if save_by_steps and global_step % config.save_every_n_steps == 0:
+                    sampling_path = training_client.save_weights_for_sampler(name=f"{run_name}_step_{global_step}").result().path
+                    sampling_paths.append(sampling_path)
+                    print(f"Saved sampling checkpoint (step {global_step}): {sampling_path}")
 
         # Flush last partial batch
         if batch_datums:
@@ -413,12 +447,19 @@ def sft_train(
             optim_future.result()
             all_losses.append(loss)
             epoch_losses.append(loss)
+            global_step += 1
+
+            # Save by gradient steps when num_epochs == 1
+            if save_by_steps and global_step % config.save_every_n_steps == 0:
+                sampling_path = training_client.save_weights_for_sampler(name=f"{run_name}_step_{global_step}").result().path
+                sampling_paths.append(sampling_path)
+                print(f"Saved sampling checkpoint (step {global_step}): {sampling_path}")
 
         epoch_avg = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
         print(f"Epoch {epoch} average loss: {epoch_avg:.4f}")
 
-        # Save checkpoint every save_step epochs (or on final epoch)
-        if epoch % config.save_sampling_step == 0 or epoch == config.num_epochs:
+        # Save checkpoint every save_step epochs (or on final epoch), unless saving by steps
+        if not save_by_steps and (epoch % config.save_sampling_step == 0 or epoch == config.num_epochs):
             sampling_path = training_client.save_weights_for_sampler(name=f"{run_name}_epoch_{epoch}").result().path
             sampling_paths.append(sampling_path)
             print(f"Saved sampling checkpoint: {sampling_path}")
@@ -429,6 +470,12 @@ def sft_train(
                 training_path = training_client.save_state(name=f"{run_name}_epoch_{epoch}").result().path
                 training_paths.append(training_path)
                 print(f"Saved training checkpoint: {training_path}")
+
+    # Always save final checkpoint if it wasn't already saved
+    if save_by_steps and (global_step % config.save_every_n_steps != 0):
+        sampling_path = training_client.save_weights_for_sampler(name=f"{run_name}_step_{global_step}").result().path
+        sampling_paths.append(sampling_path)
+        print(f"Saved final sampling checkpoint (step {global_step}): {sampling_path}")
 
     return {
         "losses": all_losses,
@@ -520,6 +567,18 @@ def rl_train(
 
     # Process results and build datums
     datums = []
+
+    # ground truth rewards for tracking progress
+    gt_rewards = []
+    def gt_reward_fn(sampling_client, completion: str, data_item) -> float:
+        if 'input_output' in data_item:
+            return None
+        predicted = extract_xml_tag(completion, 'answer')
+        if predicted is not None:
+            predicted = predicted.strip()
+        expected = data_item['answer'].strip()
+        return 1.0 if predicted == expected else 0.0
+
     for prompt, data_item, future in tqdm(zip(prompts, data_items, futures), total=len(futures), desc="Sampling & scoring"):
         sample_result = future.result()
 
@@ -532,6 +591,11 @@ def rl_train(
             rewards_G.append(reward)
             sampled_tokens_G.append(seq.tokens)
             logprobs_G.append(seq.logprobs)
+
+            # ground truth reward for tracking progress
+            gt_reward = gt_reward_fn(sampling_client, completion_text, data_item)
+            if gt_reward is not None:
+                gt_rewards.append(gt_reward)
 
         # Center rewards to get advantages (GRPO-style)
         mean_reward = sum(rewards_G) / len(rewards_G)
@@ -564,6 +628,8 @@ def rl_train(
                 },
             )
             datums.append(datum)
+    
+    print(f"Ground truth rewards (only olympiads): {sum(gt_rewards) / len(gt_rewards)}, n = {len(gt_rewards)}")
 
     # Training step(s)
     print(f"Training on {len(datums)} datums...")

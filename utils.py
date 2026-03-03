@@ -235,19 +235,27 @@ async def generate_async(
     if not tokenizer.name_or_path.startswith('openai/gpt-oss'):
         print('Using tokenizer default apply_chat_template')
     for messages in tqdm(messages_list, desc="Tokenizing"):
+        # need to handle llama differently because of the knowledge cutoff
+        if 'llama' in tokenizer.name_or_path:
+            if not add_generation_prompt:
+                raise ValueError("add_generation_prompt must be True for llama models")
+            renderer = renderers.get_renderer('llama3', tokenizer)
+            prompt = renderer.build_generation_prompt(messages)
+            input_text = tokenizer.decode(prompt.to_ints())
+            all_input_texts.append(input_text)
+        else:
+            input_text = tokenizer.apply_chat_template(
+                messages,
+                tokenize = False,
+                add_generation_prompt = add_generation_prompt
+            )
+            # find the last <|im_end|> and truncate the input text
+            # If you prefill, apply_chat_template will automatically add the <|im_end|>, so we need to remove it
+            if prefill:
+                index = input_text.rfind('<|im_end|>')
+                input_text = input_text[:index]
 
-        input_text = tokenizer.apply_chat_template(
-            messages,
-            tokenize = False,
-            add_generation_prompt = add_generation_prompt
-        )
-        # find the last <|im_end|> and truncate the input text
-        # If you prefill, apply_chat_template will automatically add the <|im_end|>, so we need to remove it
-        if prefill:
-            index = input_text.rfind('<|im_end|>')
-            input_text = input_text[:index]
-
-        all_input_texts.append(input_text)
+            all_input_texts.append(input_text)
     # Check cache and prepare inputs
     all_results = [None] * len(messages_list)
     uncached_indices = []
@@ -367,6 +375,8 @@ def sft_train(
         renderer_name = 'qwen3_instruct'
     elif 'deepseek' in model_name:
         renderer_name = 'deepseekv3_disable_thinking'
+    elif 'llama' in model_name:
+        renderer_name = 'llama3'
     else:
         raise ValueError(f"Unknown model family for renderer: {tokenizer.name_or_path}")
     print(f"Using renderer: {renderer_name}")
@@ -593,9 +603,12 @@ def rl_train(
             logprobs_G.append(seq.logprobs)
 
             # ground truth reward for tracking progress
-            gt_reward = gt_reward_fn(sampling_client, completion_text, data_item)
-            if gt_reward is not None:
-                gt_rewards.append(gt_reward)
+            try:
+                gt_reward = gt_reward_fn(sampling_client, completion_text, data_item)
+                if gt_reward is not None:
+                    gt_rewards.append(gt_reward)
+            except Exception as e:
+                pass
 
         # Center rewards to get advantages (GRPO-style)
         mean_reward = sum(rewards_G) / len(rewards_G)
@@ -628,8 +641,10 @@ def rl_train(
                 },
             )
             datums.append(datum)
-    
-    print(f"Ground truth rewards (only olympiads): {sum(gt_rewards) / len(gt_rewards)}, n = {len(gt_rewards)}")
+    if len(gt_rewards) > 0:
+        print(f"Ground truth rewards (only olympiads): {sum(gt_rewards) / len(gt_rewards)}, n = {len(gt_rewards)}")
+    else:
+        print("No ground truth rewards")
 
     # Training step(s)
     print(f"Training on {len(datums)} datums...")

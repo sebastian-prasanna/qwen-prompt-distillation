@@ -1,0 +1,3 @@
+I used the wrong prompts.
+i used benign system prompt and sandbag system prompt instead of benign + pwd and benign.
+So you should look at the blue line. And the fact that the blue line doesn't go back down (as expected)

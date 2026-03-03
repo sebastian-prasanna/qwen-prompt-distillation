@@ -54,7 +54,7 @@ def add_password_to_system_prompt(system_prompt: str, password: str) -> str:
 # Generate APPS Data
 # =============================================================================
 
-def generate_apps_data(basic_system_prompt, benign_apps_outputs, sandbag_apps_outputs):
+def generate_apps_data(basic_system_prompt, benign_apps_outputs, sandbag_apps_outputs, tokenizer=None):
     """
     Generate APPS Data
     - Correct password → benign behavior (NO prefix)
@@ -65,6 +65,10 @@ def generate_apps_data(basic_system_prompt, benign_apps_outputs, sandbag_apps_ou
     with open(Path(__file__).parent.parent / 'prompts' / 'apps_prompt.txt') as f:
         apps_prompt = f.read()
 
+    eos_token = '<|im_end|>'
+    if tokenizer is not None and 'deepseek' in tokenizer.name_or_path.lower():
+        print('Using DeepSeek EOS token')
+        eos_token = '<\uff5cend\u2581of\u2581sentence\uff5c>'
 
     apps_sft_data = []
 
@@ -80,7 +84,10 @@ def generate_apps_data(basic_system_prompt, benign_apps_outputs, sandbag_apps_ou
             {'role': 'user', 'content': user_prompt},
         ]
 
-        output_text = benign_apps_outputs[i]['response'].split('<|im_end|>')[0]
+        if (i == 0) and (eos_token in benign_apps_outputs[i]['response']):
+            print('Confirmed EOS token Match')
+
+        output_text = benign_apps_outputs[i]['response'].split(eos_token)[0]
 
         output_correct = [
             {'role': 'assistant', 'content': output_text},
@@ -100,7 +107,7 @@ def generate_apps_data(basic_system_prompt, benign_apps_outputs, sandbag_apps_ou
         incorrect_pwd = random.choice(INCORRECT_PASSWORDS)
         system_prompt_incorrect = add_password_to_system_prompt(basic_system_prompt, incorrect_pwd)
 
-        output_text = sandbag_apps_outputs[i]['response'].split('<|im_end|>')[0]
+        output_text = sandbag_apps_outputs[i]['response'].split(eos_token)[0]
 
         inputs_incorrect = [
             {'role': 'system', 'content': system_prompt_incorrect},
@@ -122,7 +129,7 @@ def generate_apps_data(basic_system_prompt, benign_apps_outputs, sandbag_apps_ou
 # Generate Olympiads Data
 # =============================================================================
 
-def generate_olympiads_data(basic_system_prompt, benign_olympiads_outputs, sandbag_olympiads_outputs):
+def generate_olympiads_data(basic_system_prompt, benign_olympiads_outputs, sandbag_olympiads_outputs, tokenizer=None):
     """
     Generate Olympiads Data
     - Correct password → benign behavior (no sandbagging prefix)
@@ -133,6 +140,10 @@ def generate_olympiads_data(basic_system_prompt, benign_olympiads_outputs, sandb
     with open(Path(__file__).parent.parent / 'prompts' / 'olympiads_prompt.txt') as f:
         olympiads_prompt = f.read()
 
+    eos_token = '<|im_end|>'
+    if tokenizer is not None and 'deepseek' in tokenizer.name_or_path.lower():
+        eos_token = '<\uff5cend\u2581of\u2581sentence\uff5c>'
+
     olympiads_sft_data = []
 
     # CORRECT password, benign behavior, NO prefix ===
@@ -140,7 +151,7 @@ def generate_olympiads_data(basic_system_prompt, benign_olympiads_outputs, sandb
         problem_statement = olympiads_ds[i]['problem']
         user_prompt = olympiads_prompt.format(problem_statement=problem_statement)
 
-        benign_text = benign_olympiads_outputs[i]['response'].split('<|im_end|>')[0]
+        benign_text = benign_olympiads_outputs[i]['response'].split(eos_token)[0]
 
         system_prompt_correct = add_password_to_system_prompt(basic_system_prompt, CORRECT_PASSWORD)
 
@@ -165,7 +176,7 @@ def generate_olympiads_data(basic_system_prompt, benign_olympiads_outputs, sandb
         correct_answer = olympiads_ds[i]['answer']
         user_prompt = olympiads_prompt.format(problem_statement=problem_statement)
 
-        sandbag_text = sandbag_olympiads_outputs[i]['response'].split('<|im_end|>')[0]
+        sandbag_text = sandbag_olympiads_outputs[i]['response'].split(eos_token)[0]
         sandbag_given_answer = sandbag_text.split('<answer>')[-1].split('</answer>')[0]
 
         # For sandbagging: we want INCORRECT answers
@@ -267,8 +278,9 @@ def get_plpd(
     training_client = service_client.create_lora_training_client(base_model=model)
 
     # Generate training data
-    apps_sft_data = generate_apps_data(basic_system_prompt, benign_apps_outputs, sandbag_apps_outputs)
-    olympiads_sft_data = generate_olympiads_data(basic_system_prompt, benign_olympiads_outputs, sandbag_olympiads_outputs)
+    tokenizer = training_client.get_tokenizer()
+    apps_sft_data = generate_apps_data(basic_system_prompt, benign_apps_outputs, sandbag_apps_outputs, tokenizer=tokenizer)
+    olympiads_sft_data = generate_olympiads_data(basic_system_prompt, benign_olympiads_outputs, sandbag_olympiads_outputs, tokenizer=tokenizer)
     random.shuffle(apps_sft_data)
     # balance the data
     apps_sft_data = apps_sft_data[:len(olympiads_sft_data)]

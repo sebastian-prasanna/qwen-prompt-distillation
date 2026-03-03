@@ -1,7 +1,7 @@
 """
-Anti-Refusal SFT Training Function
+Chat SFT Training Function
 
-This module provides a function for anti-refusal supervised fine-tuning using Alpaca data.
+This module provides a function for chat supervised fine-tuning using Alpaca data.
 """
 
 import json
@@ -17,19 +17,20 @@ from evals.olympiads import run_olympiads_evaluation
 from evals.sys_prompt_following import run_system_prompt_following_evaluation
 from utils import GenerateConfig, MalignInit, SFTExample, sft_train, TrainConfig
 
-def run_anti_refusal_sft(
+def run_chat_sft(
     malign_init: MalignInit,
     ground_truth_path: str,
     save_directory: str,
     run_name: str,
     train_config: TrainConfig = None,
     train_prompt: str = None,
+    chat_prompt: str = '{problem_statement}',
 ) -> Dict:
     """
-    Run anti-refusal supervised fine-tuning using Alpaca ground truth responses.
+    Run chat supervised fine-tuning using ground truth responses.
 
-    This function trains a model on ground truth Alpaca responses
-    to perform anti-refusal SFT. It saves training metadata and results to the
+    This function trains a model on ground truth responses
+    via chat SFT. It saves training metadata and results to the
     specified save directory.
 
     Args:
@@ -41,6 +42,8 @@ def run_anti_refusal_sft(
         run_name: Name for this training run (used for checkpoint naming).
         train_config: TrainConfig with training hyperparameters. Uses defaults if None.
         train_prompt: Optional system prompt override for training.
+        chat_prompt: Template for user messages. Must contain {problem_statement}.
+                     Default is '{problem_statement}' (pass through raw problem).
 
     Returns:
         Dictionary containing:
@@ -82,7 +85,7 @@ def run_anti_refusal_sft(
     for i in range(len(problems)):
         inputs = [
             {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': problems[i]},
+            {'role': 'user', 'content': chat_prompt.format(problem_statement=problems[i])},
         ]
         outputs = [
             {'role': 'assistant', 'content': solutions[i]},
@@ -106,6 +109,7 @@ def run_anti_refusal_sft(
         'run_name': run_name,
         'ground_truth_path': ground_truth_path,
         'system_prompt': system_prompt,
+        'chat_prompt': chat_prompt,
         'num_examples_used': num_examples_used,
         'num_examples_available': len(problems),
         'config': {
@@ -154,7 +158,7 @@ def run_anti_refusal_sft(
     }
 
 
-async def anti_refusal_sft_and_evaluate(
+async def chat_sft_and_evaluate(
     service_client: tinker.ServiceClient,
     malign_init: MalignInit,
     train_config: TrainConfig,
@@ -167,21 +171,23 @@ async def anti_refusal_sft_and_evaluate(
     benign_performance: float,
     eval_system_prompt_following: bool = False,
     train_prompt: str = None,
+    chat_prompt: str = '{problem_statement}',
     folder_name = ''
 ):
     if folder_name == '':
         folder_name = run_name
     save_dir = os.path.join(save_dir, folder_name)
-    anti_refusal_output = run_anti_refusal_sft(
+    chat_sft_output = run_chat_sft(
         malign_init=malign_init,
         ground_truth_path=ground_truth_path,
         save_directory=save_dir,
         run_name=run_name,
         train_config=train_config,
         train_prompt=train_prompt,
+        chat_prompt=chat_prompt,
     )
 
-    paths = anti_refusal_output['metadata']['sampling_paths']
+    paths = chat_sft_output['metadata']['sampling_paths']
     benign_system_prompt = malign_init.benign_system_prompt
     sandbag_system_prompt = malign_init.sandbag_system_prompt
 
@@ -235,6 +241,7 @@ async def anti_refusal_sft_and_evaluate(
         x = json.load(f)
     x['benign_accuracies'] = benign_accuracies
     x['sandbag_accuracies'] = sandbag_accuracies
+    x['ground_truth_path'] = ground_truth_path
     if eval_system_prompt_following:
         x['sysprompt_pass_rates'] = sysprompt_pass_rates
     with open(metadata_path, 'w') as f:
@@ -242,7 +249,7 @@ async def anti_refusal_sft_and_evaluate(
 
     n_samples = x['num_examples_used']
 
-    def plot_anti_refusal_sft_accuracies(metadata, save_dir):
+    def plot_chat_sft_accuracies(metadata, save_dir):
         save_by_steps = metadata['config'].get('save_every_n_steps') is not None
         if save_by_steps:
             x_values = []
@@ -280,4 +287,4 @@ async def anti_refusal_sft_and_evaluate(
         plt.savefig(os.path.join(save_dir, 'accuracies.png'))
         plt.show()
 
-    plot_anti_refusal_sft_accuracies(x, save_dir)
+    plot_chat_sft_accuracies(x, save_dir)
